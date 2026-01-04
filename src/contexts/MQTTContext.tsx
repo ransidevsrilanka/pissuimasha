@@ -1,8 +1,6 @@
 import React, { createContext, useContext, useCallback, useRef, useEffect, useState } from 'react';
-import { useMQTT } from '@/hooks/useMQTT';
+import { useMQTT, ConnectionStatus, MQTTConfig } from '@/hooks/useMQTT';
 import type { Table, Reservation, TableResponse, ReservationResponse, ReservationLookupResponse } from '@/types/mqtt';
-
-const MQTT_PORT = 9001;
 
 const TOPICS = {
   tableRequest: 'restaurant/table/request',
@@ -13,6 +11,13 @@ const TOPICS = {
   reservationLookupResponse: 'restaurant/reservation/lookup/response',
 };
 
+interface BrokerConfig {
+  host: string;
+  port: number;
+  path: string;
+  useSSL: boolean;
+}
+
 interface PendingRequest<T> {
   resolve: (value: T) => void;
   reject: (error: Error) => void;
@@ -20,9 +25,11 @@ interface PendingRequest<T> {
 
 interface MQTTContextValue {
   isConnected: boolean;
+  status: ConnectionStatus;
   error: string | null;
-  brokerIP: string;
-  setBrokerIP: (ip: string) => void;
+  brokerConfig: BrokerConfig;
+  setBrokerConfig: (config: BrokerConfig) => void;
+  reconnect: () => void;
   requestAvailableTables: (date: string, time: string, capacity?: number) => Promise<Table[]>;
   createReservation: (
     tableId: number,
@@ -33,35 +40,65 @@ interface MQTTContextValue {
     partySize: number
   ) => Promise<Reservation>;
   lookupReservation: (name?: string, phone?: string) => Promise<Reservation | null>;
+  sendTestRequest: () => void;
 }
 
 const MQTTContext = createContext<MQTTContextValue | undefined>(undefined);
 
-const BROKER_IP_KEY = 'mqtt_broker_ip';
-const DEFAULT_BROKER_IP = '192.168.1.100';
+const BROKER_CONFIG_KEY = 'mqtt_broker_config';
+const DEFAULT_BROKER_CONFIG: BrokerConfig = {
+  host: '192.168.1.100',
+  port: 9001,
+  path: '/mqtt',
+  useSSL: false,
+};
+
+const loadBrokerConfig = (): BrokerConfig => {
+  try {
+    const stored = localStorage.getItem(BROKER_CONFIG_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      return {
+        host: parsed.host || DEFAULT_BROKER_CONFIG.host,
+        port: parsed.port || DEFAULT_BROKER_CONFIG.port,
+        path: parsed.path || DEFAULT_BROKER_CONFIG.path,
+        useSSL: parsed.useSSL ?? DEFAULT_BROKER_CONFIG.useSSL,
+      };
+    }
+  } catch (e) {
+    console.error('Failed to load broker config:', e);
+  }
+  return DEFAULT_BROKER_CONFIG;
+};
 
 export const MQTTProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [brokerIP, setBrokerIPState] = useState(() => {
-    return localStorage.getItem(BROKER_IP_KEY) || DEFAULT_BROKER_IP;
-  });
+  const [brokerConfig, setBrokerConfigState] = useState<BrokerConfig>(loadBrokerConfig);
 
-  const { isConnected, error, publish, subscribe, unsubscribe } = useMQTT({
-    broker: brokerIP,
-    port: MQTT_PORT,
-  });
+  const mqttConfig: MQTTConfig = {
+    broker: brokerConfig.host,
+    port: brokerConfig.port,
+    path: brokerConfig.path,
+    useSSL: brokerConfig.useSSL,
+  };
+
+  const { status, isConnected, error, publish, subscribe, unsubscribe, reconnect } = useMQTT(mqttConfig);
 
   const pendingRequestsRef = useRef<Map<string, PendingRequest<unknown>>>(new Map());
 
-  const setBrokerIP = useCallback((ip: string) => {
-    localStorage.setItem(BROKER_IP_KEY, ip);
-    setBrokerIPState(ip);
+  const setBrokerConfig = useCallback((config: BrokerConfig) => {
+    localStorage.setItem(BROKER_CONFIG_KEY, JSON.stringify(config));
+    setBrokerConfigState(config);
+    // Force page reload to reconnect with new config
     window.location.reload();
   }, []);
 
   useEffect(() => {
     if (!isConnected) return;
 
+    console.log('🔗 Setting up MQTT subscriptions...');
+
     subscribe(TOPICS.tableResponse, (response) => {
+      console.log('📥 Table response received:', response);
       const res = response as TableResponse;
       const pending = pendingRequestsRef.current.get(res.request_id);
       if (pending) {
@@ -75,6 +112,7 @@ export const MQTTProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
 
     subscribe(TOPICS.reservationResponse, (response) => {
+      console.log('📥 Reservation response received:', response);
       const res = response as ReservationResponse;
       const pending = pendingRequestsRef.current.get(res.request_id);
       if (pending) {
@@ -88,6 +126,7 @@ export const MQTTProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
 
     subscribe(TOPICS.reservationLookupResponse, (response) => {
+      console.log('📥 Lookup response received:', response);
       const res = response as ReservationLookupResponse;
       const pending = pendingRequestsRef.current.get(res.request_id);
       if (pending) {
@@ -106,6 +145,18 @@ export const MQTTProvider: React.FC<{ children: React.ReactNode }> = ({ children
       unsubscribe(TOPICS.reservationLookupResponse);
     };
   }, [isConnected, subscribe, unsubscribe]);
+
+  const sendTestRequest = useCallback(() => {
+    const requestId = 'test_' + Date.now();
+    const request = {
+      request_id: requestId,
+      date: new Date().toISOString().split('T')[0],
+      time: '19:00',
+      capacity: 2,
+    };
+    console.log('🧪 Sending TEST table request:', request);
+    publish(TOPICS.tableRequest, request);
+  }, [publish]);
 
   const requestAvailableTables = useCallback(
     (date: string, time: string, capacity?: number): Promise<Table[]> => {
@@ -228,12 +279,15 @@ export const MQTTProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <MQTTContext.Provider
       value={{
         isConnected,
+        status,
         error,
-        brokerIP,
-        setBrokerIP,
+        brokerConfig,
+        setBrokerConfig,
+        reconnect,
         requestAvailableTables,
         createReservation,
         lookupReservation,
+        sendTestRequest,
       }}
     >
       {children}
