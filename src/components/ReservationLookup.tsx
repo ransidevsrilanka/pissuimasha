@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ArrowLeft, Search, User, Phone } from "lucide-react";
+import { ArrowLeft, Search, User, Phone, Loader2 } from "lucide-react";
+import { useMQTTContext } from "@/contexts/MQTTContext";
+import type { Reservation } from "@/types/mqtt";
 
 interface ReservationLookupProps {
   onBack: () => void;
@@ -9,39 +11,34 @@ interface ReservationLookupProps {
   onNotFound: () => void;
 }
 
-interface Reservation {
-  name: string;
-  phone: string;
-  time: string;
-  guests: number;
-  table: number;
-}
-
-// Mock reservations
-const mockReservations: Reservation[] = [
-  { name: "John Smith", phone: "555-0123", time: "7:00 PM", guests: 4, table: 3 },
-  { name: "Sarah Johnson", phone: "555-0456", time: "7:30 PM", guests: 2, table: 1 },
-  { name: "Michael Brown", phone: "555-0789", time: "8:00 PM", guests: 6, table: 5 },
-];
-
 const ReservationLookup = ({ onBack, onFound, onNotFound }: ReservationLookupProps) => {
+  const { lookupReservation, isConnected } = useMQTTContext();
   const [searchType, setSearchType] = useState<"name" | "phone">("name");
   const [searchValue, setSearchValue] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const handleSearch = () => {
+  const handleSearch = async () => {
+    if (!searchValue.trim()) return;
+
     setError("");
-    
-    const found = mockReservations.find((r) =>
-      searchType === "name"
-        ? r.name.toLowerCase().includes(searchValue.toLowerCase())
-        : r.phone.includes(searchValue)
-    );
+    setLoading(true);
 
-    if (found) {
-      onFound(found);
-    } else {
-      setError("No reservation found. Please check your details or speak with our staff.");
+    try {
+      const reservation = await lookupReservation(
+        searchType === "name" ? searchValue : undefined,
+        searchType === "phone" ? searchValue : undefined
+      );
+
+      if (reservation) {
+        onFound(reservation);
+      } else {
+        setError("No reservation found. Please check your details or speak with our staff.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to lookup reservation");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -120,6 +117,12 @@ const ReservationLookup = ({ onBack, onFound, onNotFound }: ReservationLookupPro
               {error}
             </p>
           )}
+
+          {!isConnected && (
+            <p className="text-destructive text-center font-body text-sm">
+              Not connected to reservation system
+            </p>
+          )}
         </div>
 
         {/* Search button */}
@@ -127,16 +130,28 @@ const ReservationLookup = ({ onBack, onFound, onNotFound }: ReservationLookupPro
           variant="gold"
           size="xl"
           onClick={handleSearch}
-          disabled={!searchValue.trim()}
+          disabled={!searchValue.trim() || loading || !isConnected}
           className="w-full"
         >
-          Find Reservation
+          {loading ? (
+            <>
+              <Loader2 className="w-5 h-5 animate-spin" />
+              Searching...
+            </>
+          ) : (
+            "Find Reservation"
+          )}
         </Button>
 
-        {/* Help text */}
-        <p className="text-center text-muted-foreground text-sm font-body">
-          Try: "John Smith" or "555-0123"
-        </p>
+        {/* No reservation option */}
+        <div className="text-center">
+          <button
+            onClick={onNotFound}
+            className="text-gold hover:text-gold-light font-body transition-colors"
+          >
+            Don't have a reservation? View available tables →
+          </button>
+        </div>
       </div>
     </div>
   );
